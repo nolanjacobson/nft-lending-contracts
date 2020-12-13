@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.6.0;
 
-import "openzeppelin-solidity/contracts/token/ERC721/ERC721.sol";
+import "./templates/erc721/ERC721.sol";
 import "openzeppelin-solidity/contracts/utils/Counters.sol";
 
 contract GameItem is ERC721 {
