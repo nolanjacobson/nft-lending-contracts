@@ -75,7 +75,7 @@ contract LendingLogic is Ownable {
         address borrower,
         address[] calldata nftAddressArray,
         uint256[] calldata nftTokenIdArray
-    ) external isAuthorized returns(uint256, uint256, uint256) {
+    ) external isAuthorized {
         require(nrOfInstallments > 0, "Loan must include at least 1 installment");
         require(loanAmount > 0, "Loan amount must be higher than 0");
 
@@ -84,21 +84,6 @@ contract LendingLogic is Ownable {
 
         // Transfer the items from lender to stater contract >> LendingData
         _transferItems(borrower, lendingDataAddress, nftAddressArray, nftTokenIdArray);
-
-        // Computing the defaulting limit
-        uint256 defaultingLimit = 1;
-        if ( nrOfInstallments <= 3 )
-            defaultingLimit = 1;
-        else if ( nrOfInstallments <= 5 )
-            defaultingLimit = 2;
-        else if ( nrOfInstallments >= 6 )
-            defaultingLimit = 3;
-
-        // Computing loan parameters
-        uint256 loanPlusInterest = loanAmount.mul(interestRate.add(100)).div(100); // interest rate >> 20%
-        uint256 installmentAmount = loanPlusInterest.div(nrOfInstallments);
-
-        return(defaultingLimit,loanPlusInterest,installmentAmount);
 
     }
 
@@ -115,7 +100,7 @@ contract LendingLogic is Ownable {
         require(loan.currency != address(0) || msg.value >= loan.loanAmount.add(loan.loanAmount.div(100)),"Not enough currency");
 
         // here we transfer the erc20 tokens / ether
-        _transferTokens(loan.lender,loan.borrower,loan.currency,loan.loanAmount);
+        _transferTokens(loan.lender,loan.borrower,loan.currency,loan.loanAmount,loan.loanAmount.div(100));
 
     }
     
@@ -137,6 +122,25 @@ contract LendingLogic is Ownable {
         );
     
     }
+    
+    
+      // Borrower pays installment for loan
+      // Multiple installments : OK
+      function payLoanVerification(
+        Loan memory loan
+      ) external payable {
+        require(loan.status == Status.APPROVED, "This loan is no longer in the approval phase, check its status");
+        require(loan.loanEnd >= block.timestamp, "Loan validity expired");
+        require(msg.value >= loan.installmentAmount, "Not enough currency");
+        
+        uint256 interestPerInstallement = msg.value.mul(interestRate).div(100).div(loan.nrOfInstallments); // entire interest for installment
+        uint256 interestToStaterPerInstallement = interestPerInstallement.mul(interestRateToStater).div(100); // amount of interest that goes to Stater on each installment
+        uint256 amountPaidAsInstallmentToLender = msg.value.sub(interestToStaterPerInstallement); // amount of installment that goes to lender
+        
+        // here we transfer the erc20 tokens / ether
+        _transferTokens(loan.borrower,loan.lender,loan.currency,amountPaidAsInstallmentToLender,interestToStaterPerInstallement);
+    
+      }
     
 
     // Transfer items fron an account to another
@@ -161,26 +165,27 @@ contract LendingLogic is Ownable {
         address from,
         address payable to,
         address currency,
-        uint256 quantity
+        uint256 quantity1,
+        uint256 quantity2
     ) internal {
         if ( currency != address(0) ){
 
             require(IERC20(currency).transferFrom(
                 from,
                 to, 
-                quantity
+                quantity1
             ), "Transfer of liquidity failed"); // Transfer complete loanAmount to borrower
 
             require(IERC20(currency).transferFrom(
                 from,
                 owner(), 
-                quantity.div(100)
+                quantity2
             ), "Transfer of liquidity failed"); // 1% of original loanAmount goes to contract owner
 
         }else{
 
-            require(to.send(quantity),"Transfer of liquidity failed");
-            require(payable(owner()).send(quantity.div(100)),"Transfer of liquidity failed");
+            require(to.send(quantity1),"Transfer of liquidity failed");
+            require(payable(owner()).send(quantity2.div(100)),"Transfer of liquidity failed");
 
         }
     }
@@ -265,12 +270,24 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
     loans[loanID].currency = currency;
 
 
-    (uint256 defaultingLimit, uint256 loanPlusInterest, uint256 installmentAmount) = lendingLogic.createLoanVerification(
-        nrOfInstallments,loanAmount,assetsValue,msg.sender,nftAddressArray,nftTokenIdArray
-    );
+    // Computing the defaulting limit
+    uint256 defaultingLimit = 1;
+    if ( nrOfInstallments <= 3 )
+        defaultingLimit = 1;
+    else if ( nrOfInstallments <= 5 )
+        defaultingLimit = 2;
+    else if ( nrOfInstallments >= 6 )
+        defaultingLimit = 3;
+
+    // Computing loan parameters
+    uint256 loanPlusInterest = loanAmount.mul(interestRate.add(100)).div(100); // interest rate >> 20%
+    uint256 installmentAmount = loanPlusInterest.div(nrOfInstallments);
+    
     loans[loanID].amountDue = loanPlusInterest;
     loans[loanID].installmentAmount = installmentAmount;
     loans[loanID].defaultingLimit = defaultingLimit;
+    
+    lendingLogicAddress.call(abi.encodeWithSignature("createLoanVerification(Loan)",loans[loanID]));
  
     // Fire event
     emit NewLoan(loanID, msg.sender, block.timestamp, currency, Status.LISTED, creationId);
@@ -323,35 +340,19 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
   // Multiple installments : OK
   function payLoan(uint256 loanId) external payable {
     require(loans[loanId].borrower == msg.sender, "You're not the borrower of this loan");
-    require(loans[loanId].status == Status.APPROVED, "This loan is no longer in the approval phase, check its status");
-    require(loans[loanId].loanEnd >= block.timestamp, "Loan validity expired");
-    require(msg.value >= loans[loanId].installmentAmount, "Not enough currency");
     
-    uint256 interestPerInstallement = msg.value.mul(interestRate).div(100).div(loans[loanId].nrOfInstallments); // entire interest for installment
-    uint256 interestToStaterPerInstallement = interestPerInstallement.mul(interestRateToStater).div(100); // amount of interest that goes to Stater on each installment
-    uint256 amountPaidAsInstallmentToLender = msg.value.sub(interestToStaterPerInstallement); // amount of installment that goes to lender
-    
-    if ( loans[loanId].currency != address(0) ) {
-      require(IERC20(loans[loanId].currency).transferFrom(
-        msg.sender,
-        loans[loanId].lender, 
-        amountPaidAsInstallmentToLender
-      ), "Installment transfer failed");
-      require(IERC20(loans[loanId].currency).transferFrom(
-        msg.sender,
-        owner(),
-        interestToStaterPerInstallement
-      ), "Installment transfer failed");
-    } else {
-      require(loans[loanId].lender.send(amountPaidAsInstallmentToLender), "Installment transfer to lender failed");
-      require(payable(owner()).send(interestToStaterPerInstallement), "Installment transfer to stater failed");
-    }
+    lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("payLoanVerification(Loan)",loans[loanId]));
 
     loans[loanId].paidAmount = loans[loanId].paidAmount.add(msg.value);
     loans[loanId].nrOfPayments = loans[loanId].paidAmount.div(loans[loanId].installmentAmount);
 
     if (loans[loanId].paidAmount >= loans[loanId].amountDue)
       loans[loanId].status = Status.LIQUIDATED;
+
+    uint256 interestPerInstallement = msg.value.mul(interestRate).div(100).div(loans[loanId].nrOfInstallments); // entire interest for installment
+    uint256 interestToStaterPerInstallement = interestPerInstallement.mul(interestRateToStater).div(100); // amount of interest that goes to Stater on each installment
+    uint256 amountPaidAsInstallmentToLender = msg.value.sub(interestToStaterPerInstallement); // amount of installment that goes to lender
+        
 
     emit LoanPayment(
       loanId,
