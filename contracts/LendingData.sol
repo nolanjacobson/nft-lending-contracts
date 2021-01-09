@@ -4,6 +4,7 @@
  * Stater.co
  */
 pragma solidity 0.7.4;
+pragma experimental ABIEncoderV2;
 
 
 import "openzeppelin-solidity/contracts/token/ERC20/IERC20.sol";
@@ -13,6 +14,178 @@ import "multi-token-standard/contracts/interfaces/IERC1155.sol";
 import "openzeppelin-solidity/contracts/access/Ownable.sol";
 import "openzeppelin-solidity/contracts/utils/ReentrancyGuard.sol";
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
+
+
+contract LendingLogic is Ownable {
+
+    using SafeMath for uint256;
+    uint256 public constant PRECISION = 3;
+    uint256 public ltv = 600; // 60%
+    uint256 public installmentFrequency = 7; // days
+    uint256 public interestRate = 20;
+    uint256 public interestRateToStater = 40;
+    address public lendingDataAddress;
+    enum Status {
+        UNINITIALIZED,
+        LISTED,
+        APPROVED,
+        DEFAULTED, 
+        LIQUIDATED,
+        CANCELLED
+    }
+
+    struct Loan {
+        uint256[] nftTokenIdArray; // the unique identifier of the NFT token that the borrower uses as collateral
+        uint256 loanAmount; // the amount, denominated in tokens (see next struct entry), the borrower lends
+        uint256 assetsValue; // important for determintng LTV which has to be under 50-60%
+        uint256 loanStart; // the point when the loan is approved
+        uint256 loanEnd; // the point when the loan is approved to the point when it must be paid back to the lender
+        uint256 nrOfInstallments; // the number of installments that the borrower must pay.
+        uint256 installmentAmount; // amount expected for each installment
+        uint256 amountDue; // loanAmount + interest that needs to be paid back by borrower
+        uint256 paidAmount; // the amount that has been paid back to the lender to date
+        uint256 defaultingLimit; // the number of installments allowed to be missed without getting defaulted
+        uint256 nrOfPayments; // the number of installments paid
+        Status status; // the loan status
+        address[] nftAddressArray; // the adderess of the ERC721
+        address payable borrower; // the address who receives the loan
+        address payable lender; // the address who gives/offers the loan to the borrower
+        address currency; // the token that the borrower lends, address(0) for ETH
+    }
+
+    modifier isAuthorized {
+        require(msg.sender == lendingDataAddress);
+        _;
+    }
+
+    function changeLendingData(address lendingData) external onlyOwner {
+        lendingDataAddress = lendingData;
+    }
+
+    // Calculates loan to value ratio
+    function percent(uint256 numerator, uint256 denominator, uint256 precision) public pure returns(uint256) {
+        return numerator.mul(10 ** (precision + 1)).div(denominator).add(5).div(10);
+    }
+
+    // Borrower creates a loan
+    function createLoanVerification(
+        uint256 nrOfInstallments,
+        uint256 loanAmount,
+        uint256 assetsValue,
+        address borrower,
+        address[] calldata nftAddressArray,
+        uint256[] calldata nftTokenIdArray
+    ) external isAuthorized returns(uint256, uint256, uint256) {
+        require(nrOfInstallments > 0, "Loan must include at least 1 installment");
+        require(loanAmount > 0, "Loan amount must be higher than 0");
+
+        // Compute loan to value ratio for current loan application
+        require(percent(loanAmount, assetsValue, PRECISION) <= ltv, "LTV exceeds maximum limit allowed");
+
+        // Transfer the items from lender to stater contract >> LendingData
+        _transferItems(borrower, lendingDataAddress, nftAddressArray, nftTokenIdArray);
+
+        // Computing the defaulting limit
+        uint256 defaultingLimit = 1;
+        if ( nrOfInstallments <= 3 )
+            defaultingLimit = 1;
+        else if ( nrOfInstallments <= 5 )
+            defaultingLimit = 2;
+        else if ( nrOfInstallments >= 6 )
+            defaultingLimit = 3;
+
+        // Computing loan parameters
+        uint256 loanPlusInterest = loanAmount.mul(interestRate.add(100)).div(100); // interest rate >> 20%
+        uint256 installmentAmount = loanPlusInterest.div(nrOfInstallments);
+
+        return(defaultingLimit,loanPlusInterest,installmentAmount);
+
+    }
+
+
+    // Lender approves a loan
+    function approveLoanVerification(
+        Loan memory loan
+    ) external isAuthorized payable {
+        require(loan.lender == address(0), "Someone else payed for this loan before you");
+        require(loan.paidAmount == 0, "This loan is currently not ready for lenders");
+        require(loan.status == Status.LISTED, "This loan is not currently ready for lenders, check later");
+
+        // msg.value provides the qty of ether sent to smart contract , not good for custom erc20 tokens
+        require(loan.currency != address(0) || msg.value >= loan.loanAmount.add(loan.loanAmount.div(100)),"Not enough currency");
+
+        // here we transfer the erc20 tokens / ether
+        _transferTokens(loan.lender,loan.borrower,loan.currency,loan.loanAmount);
+
+    }
+    
+    
+    // Borrower cancels a loan
+    function cancelLoanVerification(
+        Loan memory loan
+    ) isAuthorized external {
+        require(loan.lender == address(0), "The loan has a lender , it cannot be cancelled");
+        require(loan.status != Status.CANCELLED, "This loan is already cancelled");
+        require(loan.status == Status.LISTED, "This loan is no longer cancellable");
+    
+        // We send the items back to him
+        _transferItems(
+          msg.sender, 
+          loan.borrower, 
+          loan.nftAddressArray, 
+          loan.nftTokenIdArray
+        );
+    
+    }
+    
+
+    // Transfer items fron an account to another
+    // Requires approvement
+    function _transferItems(
+        address from, 
+        address to, 
+        address[] memory nftAddressArray, 
+        uint256[] memory nftTokenIdArray
+    ) internal {
+        uint256 length = nftAddressArray.length;
+        require(length == nftTokenIdArray.length, "Token infos provided are invalid");
+        for(uint256 i = 0; i < length; ++i) 
+        IERC721(nftAddressArray[i]).safeTransferFrom(
+            from,
+            to,
+            nftTokenIdArray[i]
+        );
+    }
+
+    function _transferTokens(
+        address from,
+        address payable to,
+        address currency,
+        uint256 quantity
+    ) internal {
+        if ( currency != address(0) ){
+
+            require(IERC20(currency).transferFrom(
+                from,
+                to, 
+                quantity
+            ), "Transfer of liquidity failed"); // Transfer complete loanAmount to borrower
+
+            require(IERC20(currency).transferFrom(
+                from,
+                owner(), 
+                quantity.div(100)
+            ), "Transfer of liquidity failed"); // 1% of original loanAmount goes to contract owner
+
+        }else{
+
+            require(to.send(quantity),"Transfer of liquidity failed");
+            require(payable(owner()).send(quantity.div(100)),"Transfer of liquidity failed");
+
+        }
+    }
+
+}
 
 
 contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
@@ -67,7 +240,7 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
 
   function changeLendingLogic(address theLendingLogicAddress) external onlyOwner {
     lendingLogicAddress = theLendingLogicAddress;
-    lendingLogic = new LendingLogic(lendingLogicAddress);
+    lendingLogic = LendingLogic(lendingLogicAddress);
   }
 
   // Borrower creates a loan
@@ -91,7 +264,10 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
     loans[loanID].borrower = msg.sender;
     loans[loanID].currency = currency;
 
-    (uint256 defaultingLimit, uint256 loanPlusInterest, uint256 installmentAmount) = lendingLogic.createLoanVerification(loans[loanID]);
+
+    (uint256 defaultingLimit, uint256 loanPlusInterest, uint256 installmentAmount) = lendingLogic.createLoanVerification(
+        nrOfInstallments,loanAmount,assetsValue,msg.sender,nftAddressArray,nftTokenIdArray
+    );
     loans[loanID].amountDue = loanPlusInterest;
     loans[loanID].installmentAmount = installmentAmount;
     loans[loanID].defaultingLimit = defaultingLimit;
@@ -108,9 +284,11 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
     // Borrower assigned , status is APPROVED , first installment ( payment ) completed
     loans[loanId].lender = msg.sender;
     loans[loanId].status = Status.APPROVED;
-    (uint256 blockTimestamp, uint256 loanEnd) = lendingLogic.approveLoanVerification.value(msg.value)(loans[laonId]);
-    loans[loanId].loanStart = blockTimestamp;
-    loans[loanId].loanEnd = loanEnd;
+    
+    // lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("approveLoanVerification(Loan)",loans[loanId])); >> returns boolean
+    lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("approveLoanVerification(Loan)",loans[loanId]));
+    loans[loanId].loanStart = block.timestamp;
+    loans[loanId].loanEnd = block.timestamp.add(loans[loanId].nrOfInstallments.mul(installmentFrequency).mul(1 days));
 
     emit LoanApproved(
       loanId,
@@ -126,22 +304,13 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
 
   // Borrower cancels a loan
   function cancelLoan(uint256 loanId) external {
-    require(loans[loanId].lender == address(0), "The loan has a lender , it cannot be cancelled");
     require(loans[loanId].borrower == msg.sender, "You're not the borrower of this loan");
-    require(loans[loanId].status != Status.CANCELLED, "This loan is already cancelled");
-    require(loans[loanId].status == Status.LISTED, "This loan is no longer cancellable");
+        
+    lendingLogicAddress.call(abi.encodeWithSignature("cancelLoanVerification(Loan)",loans[loanId]));
     
     // We set its validity date as block.timestamp
     loans[loanId].loanEnd = block.timestamp;
     loans[loanId].status = Status.CANCELLED;
-
-    // We send the items back to him
-    _transferItems(
-      address(this), 
-      loans[loanId].borrower, 
-      loans[loanId].nftAddressArray, 
-      loans[loanId].nftTokenIdArray
-    );
 
     emit LoanCancelled(
       loanId,
