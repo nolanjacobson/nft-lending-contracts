@@ -19,6 +19,8 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
 
   using SafeMath for uint256;
 
+  address public lendingLogicAddress;
+  LendingLogic lendingLogic;
   uint256 public loanID;
   uint256 public constant PRECISION = 3;
   uint256 public ltv = 600; // 60%
@@ -63,6 +65,11 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
 
   mapping(uint256 => Loan) public loans;
 
+  function changeLendingLogic(address theLendingLogicAddress) external onlyOwner {
+    lendingLogicAddress = theLendingLogicAddress;
+    lendingLogic = new LendingLogic(lendingLogicAddress);
+  }
+
   // Borrower creates a loan
   function createLoan(
     uint256 loanAmount,
@@ -73,78 +80,37 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
     uint256[] calldata nftTokenIdArray,
     string calldata creationId
   ) external {
-    require(nrOfInstallments > 0, "Loan must include at least 1 installment");
-    require(loanAmount > 0, "Loan amount must be higher than 0");
-
-    // Compute loan to value ratio for current loan application
-    require(_percent(loanAmount, assetsValue, PRECISION) <= ltv, "LTV exceeds maximum limit allowed");
-
-    // Transfer the items from lender to stater contract
-    _transferItems(msg.sender, address(this), nftAddressArray, nftTokenIdArray);
-
-    // Computing the defaulting limit
-    uint256 defaultingLimit = 1;
-    if ( nrOfInstallments <= 3 )
-        defaultingLimit = 1;
-    else if ( nrOfInstallments <= 5 )
-        defaultingLimit = 2;
-    else if ( nrOfInstallments >= 6 )
-        defaultingLimit = 3;
-
-    // Computing loan parameters
-    uint256 loanPlusInterest = loanAmount.mul(interestRate.add(100)).div(100); // interest rate >> 20%
-    uint256 installmentAmount = loanPlusInterest.div(nrOfInstallments);
 
     // Set loan fields
     loans[loanID].nftTokenIdArray = nftTokenIdArray;
     loans[loanID].loanAmount = loanAmount;
     loans[loanID].assetsValue = assetsValue;
-    loans[loanID].amountDue = loanPlusInterest;
     loans[loanID].nrOfInstallments = nrOfInstallments;
-    loans[loanID].installmentAmount = installmentAmount;
-    loans[loanID].defaultingLimit = defaultingLimit;
     loans[loanID].status = Status.LISTED;
     loans[loanID].nftAddressArray = nftAddressArray;
     loans[loanID].borrower = msg.sender;
     loans[loanID].currency = currency;
+
+    (uint256 defaultingLimit, uint256 loanPlusInterest, uint256 installmentAmount) = lendingLogic.createLoanVerification(loans[loanID]);
+    loans[loanID].amountDue = loanPlusInterest;
+    loans[loanID].installmentAmount = installmentAmount;
+    loans[loanID].defaultingLimit = defaultingLimit;
  
     // Fire event
     emit NewLoan(loanID, msg.sender, block.timestamp, currency, Status.LISTED, creationId);
-    ++loanID;
+    loanID.add(1);
   }
 
 
   // Lender approves a loan
   function approveLoan(uint256 loanId) external payable {
-    require(loans[loanId].lender == address(0), "Someone else payed for this loan before you");
-    require(loans[loanId].paidAmount == 0, "This loan is currently not ready for lenders");
-    require(loans[loanId].status == Status.LISTED, "This loan is not currently ready for lenders, check later");
-    require(msg.value >= loans[loanId].loanAmount.add(loans[loanId].loanAmount.div(100)),"Not enough currency");
-    
-    if ( loans[loanId].currency != address(0) ){
 
-      require(IERC20(loans[loanId].currency).transferFrom(
-        msg.sender,
-        loans[loanId].borrower, 
-        loans[loanId].loanAmount
-      ), "Transfer of liquidity failed"); // Transfer complete loanAmount to borrower
-
-      require(IERC20(loans[loanId].currency).transferFrom(
-        msg.sender,
-        owner(), 
-        loans[loanId].loanAmount.div(100)
-      ), "Transfer of liquidity failed"); // 1% of original loanAmount goes to contract owner
-
-    }else{
-      require(loans[loanId].borrower.send(loans[loanId].loanAmount),"Transfer of liquidity failed");
-      require(payable(owner()).send(loans[loanId].loanAmount.div(100)),"Transfer of liquidity failed");
-    }
-
-    // Borrower assigned , status is 1 , first installment ( payment ) completed
+    // Borrower assigned , status is APPROVED , first installment ( payment ) completed
     loans[loanId].lender = msg.sender;
-    loans[loanId].loanEnd = block.timestamp.add(loans[loanId].nrOfInstallments.mul(installmentFrequency).mul(1 days));
     loans[loanId].status = Status.APPROVED;
-    loans[loanId].loanStart = block.timestamp;
+    (uint256 blockTimestamp, uint256 loanEnd) = lendingLogic.approveLoanVerification.value(msg.value)(loans[laonId]);
+    loans[loanId].loanStart = blockTimestamp;
+    loans[loanId].loanEnd = loanEnd;
 
     emit LoanApproved(
       loanId,
@@ -153,6 +119,7 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
       loans[loanId].loanEnd,
       Status.APPROVED
     );
+
   }
 
 
