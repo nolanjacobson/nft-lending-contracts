@@ -53,10 +53,13 @@ contract LendingLogic is Ownable {
         address currency; // the token that the borrower lends, address(0) for ETH
     }
 
+    event ItemsWithdrawn(uint256 indexed loanId, address indexed requester, Status status);
     event LoanPayment(uint256 indexed loanId, uint256 paymentDate, uint256 installmentAmount, uint256 amountPaidAsInstallmentToLender, uint256 interestPerInstallement, uint256 interestToStaterPerInstallement, Status status);
     event LoanApproved(uint256 indexed loanId, address indexed lender, uint256 approvalDate, uint256 loanPaymentEnd, Status status);
     event NewLoan(uint256 indexed loanId, address indexed owner, uint256 creationDate, address indexed currency, Status status, string creationId);
     event LoanCancelled(uint256 indexed loanId, uint256 cancellationDate, Status status);
+    event LoanTerminated(uint256 indexed loanId, uint256 terminationDate);
+    event LtvChanged(uint256 newLTV);
 
     modifier isAuthorized {
         require(msg.sender == lendingDataAddress);
@@ -157,7 +160,7 @@ contract LendingLogic is Ownable {
         Loan memory loan,
         uint256 loanId,
         address sender
-      ) external payable {
+      ) isAuthorized external payable {
         require(loan.borrower == sender, "You're not the borrower of this loan");
         require(loan.status == Status.APPROVED, "This loan is no longer in the approval phase, check its status");
         require(loan.loanEnd >= block.timestamp, "Loan validity expired");
@@ -182,6 +185,67 @@ contract LendingLogic is Ownable {
     
       }
     
+
+      // Borrower can withdraw loan items if loan is LIQUIDATED
+      // Lender can withdraw loan item is loan is DEFAULTED
+      function withdrawItemsVerification(
+          Loan memory loan,
+          uint256 loanId,
+          address sender
+      ) isAuthorized external {
+        require(block.timestamp >= loan.loanEnd || loan.paidAmount >= loan.amountDue, "The loan is not finished yet");
+        require(loan.status == Status.LIQUIDATED || loan.status == Status.APPROVED, "Incorrect state of loan");
+    
+        if ( block.timestamp >= loan.loanEnd && loan.paidAmount < loan.amountDue )
+          
+          // We send the items back to him
+          _transferItems(
+            msg.sender,
+            loan.lender,
+            loan.nftAddressArray,
+            loan.nftTokenIdArray
+          );
+    
+        else if ( loan.paidAmount >= loan.amountDue )
+    
+          // Otherwise the lender will receive the items
+          _transferItems(
+            msg.sender,
+            loan.borrower,
+            loan.nftAddressArray,
+            loan.nftTokenIdArray
+          );
+            
+        
+        emit ItemsWithdrawn(
+          loanId,
+          sender,
+          loan.status
+        );
+    
+      }
+      
+    function terminateLoanVerification(
+        Loan memory loan,
+        uint256 loanId,
+        address sender
+    ) isAuthorized external {
+        require(sender == loan.borrower || sender == loan.lender, "You can't access this loan");
+        require(loan.status == Status.APPROVED, "Loan must be approved");
+        require(loan.status == Status.APPROVED && loan.loanStart.add(loan.nrOfPayments.mul(installmentFrequency.mul(1 days))) <= block.timestamp.sub(loan.defaultingLimit.mul(installmentFrequency.mul(1 days))), "Borrower still has time to pay his installments");
+    
+        // The lender will take the items
+        _transferItems(
+          msg.sender,
+          loan.lender,
+          loan.nftAddressArray,
+          loan.nftTokenIdArray
+        );
+    
+        emit LoanTerminated(loanId,block.timestamp);
+    
+      }
+
 
     // Transfer items fron an account to another
     // Requires approvement
@@ -229,6 +293,12 @@ contract LendingLogic is Ownable {
 
         }
     }
+    
+      // TODO validate input
+      function setLtv(uint256 newLtv) external onlyOwner {
+        ltv = newLtv;
+        emit LtvChanged(newLtv);
+      }
 
 }
 
@@ -240,14 +310,9 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
   address public lendingLogicAddress;
   LendingLogic lendingLogic;
   uint256 public loanID;
-  uint256 public constant PRECISION = 3;
-  uint256 public ltv = 600; // 60%
   uint256 public installmentFrequency = 7; // days
   uint256 public interestRate = 20;
   uint256 public interestRateToStater = 40;
-
-  event ItemsWithdrawn(uint256 indexed loanId, address indexed requester, Status status);
-  event LtvChanged(uint256 newLTV);
 
   enum Status {
     UNINITIALIZED,
@@ -376,53 +441,17 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
   // Borrower can withdraw loan items if loan is LIQUIDATED
   // Lender can withdraw loan item is loan is DEFAULTED
   function withdrawItems(uint256 loanId) external {
-    require(block.timestamp >= loans[loanId].loanEnd || loans[loanId].paidAmount >= loans[loanId].amountDue, "The loan is not finished yet");
-    require(loans[loanId].status == Status.LIQUIDATED || loans[loanId].status == Status.APPROVED, "Incorrect state of loan");
 
-    if ( (block.timestamp >= loans[loanId].loanEnd) && !(loans[loanId].paidAmount >= loans[loanId].amountDue) ) {
+    lendingLogicAddress.call(abi.encodeWithSignature("withdrawItemsVerification(Loan,uint256,address)",loans[loanId],loanId,msg.sender));
 
+    if ( block.timestamp >= loans[loanId].loanEnd && loans[loanId].paidAmount < loans[loanId].amountDue )
       loans[loanId].status = Status.DEFAULTED;
-      
-      // We send the items back to him
-      _transferItems(
-        address(this),
-        loans[loanId].lender,
-        loans[loanId].nftAddressArray,
-        loans[loanId].nftTokenIdArray
-      );
-
-    } else if ( loans[loanId].paidAmount >= loans[loanId].amountDue ) {
-
-      // Otherwise the lender will receive the items
-      _transferItems(
-        address(this),
-        loans[loanId].borrower,
-        loans[loanId].nftAddressArray,
-        loans[loanId].nftTokenIdArray
-      );
-        
-    }
-
-    emit ItemsWithdrawn(
-      loanId,
-      msg.sender,
-      loans[loanId].status
-    );
 
   }
 
   function terminateLoan(uint256 loanId) external {
-    require(msg.sender == loans[loanId].borrower || msg.sender == loans[loanId].lender, "You can't access this loan");
-    require(loans[loanId].status == Status.APPROVED, "Loan must be approved");
-    require(lackOfPayment(loanId), "Borrower still has time to pay his installments");
 
-    // The lender will take the items
-    _transferItems(
-      address(this),
-      loans[loanId].lender,
-      loans[loanId].nftAddressArray,
-      loans[loanId].nftTokenIdArray
-    );
+    lendingLogicAddress.call(abi.encodeWithSignature("terminateLoanVerification(Loan,uint256,address)",loans[loanId],loanId,msg.sender));
 
     loans[loanId].status = Status.DEFAULTED;
     loans[loanId].loanEnd = block.timestamp;
@@ -431,12 +460,6 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
   
 
   // Internal Functions 
-
-  // Calculates loan to value ratio
-  function _percent(uint256 numerator, uint256 denominator, uint256 precision) internal pure returns(uint256) {
-    // (((numerator * 10 ** (precision + 1)) / denominator) + 5) / 10;
-    return numerator.mul(10 ** (precision + 1)).div(denominator).add(5).div(10);
-  }
 
   // Transfer items fron an account to another
   // Requires approvement
@@ -534,12 +557,6 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
   
   function getLoansCount() external view returns(uint256) {
     return loanID;
-  }
-
-  // TODO validate input
-  function setLtv(uint256 newLtv) external onlyOwner {
-    ltv = newLtv;
-    emit LtvChanged(newLtv);
   }
 
 
