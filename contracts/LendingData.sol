@@ -53,6 +53,11 @@ contract LendingLogic is Ownable {
         address currency; // the token that the borrower lends, address(0) for ETH
     }
 
+    event LoanPayment(uint256 indexed loanId, uint256 paymentDate, uint256 installmentAmount, uint256 amountPaidAsInstallmentToLender, uint256 interestPerInstallement, uint256 interestToStaterPerInstallement, Status status);
+    event LoanApproved(uint256 indexed loanId, address indexed lender, uint256 approvalDate, uint256 loanPaymentEnd, Status status);
+    event NewLoan(uint256 indexed loanId, address indexed owner, uint256 creationDate, address indexed currency, Status status, string creationId);
+    event LoanCancelled(uint256 indexed loanId, uint256 cancellationDate, Status status);
+
     modifier isAuthorized {
         require(msg.sender == lendingDataAddress);
         _;
@@ -69,28 +74,33 @@ contract LendingLogic is Ownable {
 
     // Borrower creates a loan
     function createLoanVerification(
-        uint256 nrOfInstallments,
-        uint256 loanAmount,
-        uint256 assetsValue,
-        address borrower,
-        address[] calldata nftAddressArray,
-        uint256[] calldata nftTokenIdArray
+        Loan memory loan,
+        uint256 loanId,
+        string memory creationId,
+        address sender
     ) external isAuthorized {
-        require(nrOfInstallments > 0, "Loan must include at least 1 installment");
-        require(loanAmount > 0, "Loan amount must be higher than 0");
+        
+        // Fire event
+        require(loan.nrOfInstallments > 0, "Loan must include at least 1 installment");
+        require(loan.loanAmount > 0, "Loan amount must be higher than 0");
+        require(loan.status == Status.LISTED, "Loan status is not LISTED");
 
         // Compute loan to value ratio for current loan application
-        require(percent(loanAmount, assetsValue, PRECISION) <= ltv, "LTV exceeds maximum limit allowed");
+        require(percent(loan.loanAmount, loan.assetsValue, PRECISION) <= ltv, "LTV exceeds maximum limit allowed");
 
         // Transfer the items from lender to stater contract >> LendingData
-        _transferItems(borrower, lendingDataAddress, nftAddressArray, nftTokenIdArray);
+        _transferItems(loan.borrower, msg.sender, loan.nftAddressArray, loan.nftTokenIdArray);
+
+        emit NewLoan(loanId, sender, block.timestamp, loan.currency, Status.LISTED, creationId);
 
     }
 
 
     // Lender approves a loan
     function approveLoanVerification(
-        Loan memory loan
+        Loan memory loan,
+        address sender,
+        uint loanId
     ) external isAuthorized payable {
         require(loan.lender == address(0), "Someone else payed for this loan before you");
         require(loan.paidAmount == 0, "This loan is currently not ready for lenders");
@@ -102,13 +112,24 @@ contract LendingLogic is Ownable {
         // here we transfer the erc20 tokens / ether
         _transferTokens(loan.lender,loan.borrower,loan.currency,loan.loanAmount,loan.loanAmount.div(100));
 
+        emit LoanApproved(
+          loanId,
+          sender,
+          block.timestamp,
+          loan.loanEnd,
+          Status.APPROVED
+        );
+
     }
     
     
     // Borrower cancels a loan
     function cancelLoanVerification(
-        Loan memory loan
+        Loan memory loan,
+        uint256 loanId,
+        address sender
     ) isAuthorized external {
+        require(loan.borrower == sender, "You're not the borrower of this loan");
         require(loan.lender == address(0), "The loan has a lender , it cannot be cancelled");
         require(loan.status != Status.CANCELLED, "This loan is already cancelled");
         require(loan.status == Status.LISTED, "This loan is no longer cancellable");
@@ -120,15 +141,24 @@ contract LendingLogic is Ownable {
           loan.nftAddressArray, 
           loan.nftTokenIdArray
         );
-    
+        
+        emit LoanCancelled(
+          loanId,
+          block.timestamp,
+          Status.CANCELLED
+        );
+        
     }
     
     
       // Borrower pays installment for loan
       // Multiple installments : OK
       function payLoanVerification(
-        Loan memory loan
+        Loan memory loan,
+        uint256 loanId,
+        address sender
       ) external payable {
+        require(loan.borrower == sender, "You're not the borrower of this loan");
         require(loan.status == Status.APPROVED, "This loan is no longer in the approval phase, check its status");
         require(loan.loanEnd >= block.timestamp, "Loan validity expired");
         require(msg.value >= loan.installmentAmount, "Not enough currency");
@@ -139,6 +169,16 @@ contract LendingLogic is Ownable {
         
         // here we transfer the erc20 tokens / ether
         _transferTokens(loan.borrower,loan.lender,loan.currency,amountPaidAsInstallmentToLender,interestToStaterPerInstallement);
+        
+        emit LoanPayment(
+          loanId,
+          block.timestamp,
+          msg.value,
+          amountPaidAsInstallmentToLender,
+          interestPerInstallement,
+          interestToStaterPerInstallement,
+          loan.status
+        );
     
       }
     
@@ -206,11 +246,7 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
   uint256 public interestRate = 20;
   uint256 public interestRateToStater = 40;
 
-  event NewLoan(uint256 indexed loanId, address indexed owner, uint256 creationDate, address indexed currency, Status status, string creationId);
-  event LoanApproved(uint256 indexed loanId, address indexed lender, uint256 approvalDate, uint256 loanPaymentEnd, Status status);
-  event LoanCancelled(uint256 indexed loanId, uint256 cancellationDate, Status status);
   event ItemsWithdrawn(uint256 indexed loanId, address indexed requester, Status status);
-  event LoanPayment(uint256 indexed loanId, uint256 paymentDate, uint256 installmentAmount, uint256 amountPaidAsInstallmentToLender, uint256 interestPerInstallement, uint256 interestToStaterPerInstallement, Status status);
   event LtvChanged(uint256 newLTV);
 
   enum Status {
@@ -287,10 +323,8 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
     loans[loanID].installmentAmount = installmentAmount;
     loans[loanID].defaultingLimit = defaultingLimit;
     
-    lendingLogicAddress.call(abi.encodeWithSignature("createLoanVerification(Loan)",loans[loanID]));
+    lendingLogicAddress.call(abi.encodeWithSignature("createLoanVerification(Loan,uint256,string,address)",loans[loanID],loanID,creationId,msg.sender));
  
-    // Fire event
-    emit NewLoan(loanID, msg.sender, block.timestamp, currency, Status.LISTED, creationId);
     loanID.add(1);
   }
 
@@ -298,22 +332,15 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
   // Lender approves a loan
   function approveLoan(uint256 loanId) external payable {
 
+    // lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("approveLoanVerification(Loan)",loans[loanId])); >> returns boolean
+    lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("approveLoanVerification(Loan,address,uint256)",loans[loanId],msg.sender,loanId));
+
     // Borrower assigned , status is APPROVED , first installment ( payment ) completed
     loans[loanId].lender = msg.sender;
     loans[loanId].status = Status.APPROVED;
     
-    // lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("approveLoanVerification(Loan)",loans[loanId])); >> returns boolean
-    lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("approveLoanVerification(Loan)",loans[loanId]));
     loans[loanId].loanStart = block.timestamp;
     loans[loanId].loanEnd = block.timestamp.add(loans[loanId].nrOfInstallments.mul(installmentFrequency).mul(1 days));
-
-    emit LoanApproved(
-      loanId,
-      msg.sender,
-      block.timestamp,
-      loans[loanId].loanEnd,
-      Status.APPROVED
-    );
 
   }
 
@@ -321,48 +348,27 @@ contract LendingData is ERC721Holder, Ownable, ReentrancyGuard {
 
   // Borrower cancels a loan
   function cancelLoan(uint256 loanId) external {
-    require(loans[loanId].borrower == msg.sender, "You're not the borrower of this loan");
         
-    lendingLogicAddress.call(abi.encodeWithSignature("cancelLoanVerification(Loan)",loans[loanId]));
+    lendingLogicAddress.call(abi.encodeWithSignature("cancelLoanVerification(Loan,uint256,address)",loans[loanId],loanId,msg.sender));
     
     // We set its validity date as block.timestamp
     loans[loanId].loanEnd = block.timestamp;
     loans[loanId].status = Status.CANCELLED;
 
-    emit LoanCancelled(
-      loanId,
-      block.timestamp,
-      Status.CANCELLED
-    );
   }
 
   // Borrower pays installment for loan
   // Multiple installments : OK
   function payLoan(uint256 loanId) external payable {
-    require(loans[loanId].borrower == msg.sender, "You're not the borrower of this loan");
-    
-    lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("payLoanVerification(Loan)",loans[loanId]));
 
     loans[loanId].paidAmount = loans[loanId].paidAmount.add(msg.value);
     loans[loanId].nrOfPayments = loans[loanId].paidAmount.div(loans[loanId].installmentAmount);
 
     if (loans[loanId].paidAmount >= loans[loanId].amountDue)
       loans[loanId].status = Status.LIQUIDATED;
+      
+    lendingLogicAddress.call{ value : msg.value }(abi.encodeWithSignature("payLoanVerification(Loan,uint256,address)",loans[loanId],loanId,msg.sender));
 
-    uint256 interestPerInstallement = msg.value.mul(interestRate).div(100).div(loans[loanId].nrOfInstallments); // entire interest for installment
-    uint256 interestToStaterPerInstallement = interestPerInstallement.mul(interestRateToStater).div(100); // amount of interest that goes to Stater on each installment
-    uint256 amountPaidAsInstallmentToLender = msg.value.sub(interestToStaterPerInstallement); // amount of installment that goes to lender
-        
-
-    emit LoanPayment(
-      loanId,
-      block.timestamp,
-      msg.value,
-      amountPaidAsInstallmentToLender,
-      interestPerInstallement,
-      interestToStaterPerInstallement,
-      loans[loanId].status
-    );
   }
 
 
