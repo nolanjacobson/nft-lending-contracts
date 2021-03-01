@@ -80,6 +80,9 @@ contract('LendingData', async (accounts) => {
   let createdLoanId;
   let tokenIdToAdd = 3;
   let timeStampWeeks = 3;
+  let lenderFee = 100;
+  let discountNft = 50; // 50%
+  let discountGeyser = 5; // 15%
 
   describe("4 > Should set all Lending Contract global variables", function () {
 
@@ -101,16 +104,17 @@ contract('LendingData', async (accounts) => {
     // setGlobalVariables(uint256,uint256,uint256)
     it('Should set the lending contract global variables', async () => {
       const instance = await LendingData.deployed(); 
-      let setGlobalVariables = await instance.setGlobalVariables(ltv,installmentFrequency,timeStampWeeks,interestRate,interestRateToStater,{ from: accounts[0] });
+      let setGlobalVariables = await instance.setGlobalVariables(ltv,installmentFrequency,timeStampWeeks,interestRate,interestRateToStater,lenderFee,{ from: accounts[0] });
       assert.typeOf(setGlobalVariables, 'object', "[BUGGED] :: Not possible to set the loan global variables.");
     });
 
-    // setNftAddress(address)
-    it('Should set the nft address', async () => {
+    // setDiscounts(uint32,uint32,address[] calldata,uint256[] calldata,address)
+    it('Should set the lending contract discount', async () => {
       const instance = await LendingData.deployed();
-      const nft1155 = await GameItems1155.deployed(); 
-      let setNftAddress = await instance.setNftAddress(nft1155.address,{ from: accounts[0] });
-      assert.typeOf(setNftAddress, 'object', "[BUGGED] :: Not possible to set the loan global variables.");
+      const geyser = await TokenGeyser.deployed();
+      const nft1155 = await GameItems1155.deployed();
+      let setDiscounts = await instance.setDiscounts(discountNft,discountGeyser,[geyser.address],[0,1],nft1155.address,{ from: accounts[0] });
+      assert.typeOf(setDiscounts, 'object', "[BUGGED] :: Not possible to set the loan global variables.");
     });
     
   });
@@ -174,7 +178,7 @@ contract('LendingData', async (accounts) => {
         let max = Math.floor(loanAmount * 160 / 100);
         let assetsValue = loanAmount + Math.floor(Math.random() * (max - min + 1)) + min;
         let creationId = "db_index";
-        let nrOfTokensToAdd = Math.floor(Math.random() * 20);
+        let nrOfTokensToAdd = Math.floor(Math.random() * 20) + 1;
         let nftAddressArray = [];
         let nftTokenIdArray = [];
         let nftTokenTypeArray = [];
@@ -248,6 +252,7 @@ contract('LendingData', async (accounts) => {
         for (let j = 0, k = createLoan.logs.length; j < k; ++j)
           createdLoanId = createLoan.logs[j].args.loanId;
         assert.typeOf(createLoan.receipt, 'object', "[ERROR] :: Create loan failed.");
+       
       });
 
       // getLoanApprovalCost(uint256)
@@ -321,7 +326,6 @@ contract('LendingData', async (accounts) => {
         }
       });
 
-
       // payLoan(uint256)
       it('Should pay for loan, 1x installment', async () => {
         const instance = await LendingData.deployed();
@@ -330,17 +334,17 @@ contract('LendingData', async (accounts) => {
         let txOptions = { from: accounts[0] };
         let installmentAmount = await instance.getLoanInstallmentCost.call(createdLoanId,1);
         installmentAmount = installmentAmount.overallInstallmentAmount;
-        /*
-        if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
-          installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
-        */
-        let regExp = /[a-zA-Z]/g;      
-        if(regExp.test(installmentAmount))
-          installmentAmount = web3.utils.hexToNumber(installmentAmount);
+        
+        //if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
+          //installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
+        
+        //let regExp = /[a-zA-Z]/g;      
+        //if(regExp.test(installmentAmount))
+          //installmentAmount = web3.utils.hexToNumber(installmentAmount);
 
         assert.equal(web3.utils.hexToNumber(loanObject.nrOfPayments), 0, "[BUGGED] :: Loan should have no payment at this point.");
 
-        console.log("We pay : " + installmentAmount + " where max amount is : " + web3.utils.hexToNumber(loanObject.amountDue));
+        //console.log("We pay : " + installmentAmount + " where max amount is : " + web3.utils.hexToNumber(loanObject.amountDue));
         if ( loanObject.currency !== "0x0000000000000000000000000000000000000000" ){
           txOptions.value = 0;
           let approveFungibleTokensToParties = await instanceFungibleTokens.approve(instance.address,installmentAmount,{
@@ -358,7 +362,6 @@ contract('LendingData', async (accounts) => {
         assert.equal(web3.utils.hexToNumber(loanObject.nrOfPayments), 1, "[BUGGED] :: Loan should have 1 payment at this point.");
       });
 
-
       // payLoan(uint256)
       it('Should pay for loan, half of the installments', async () => {
         const instance = await LendingData.deployed();
@@ -368,13 +371,13 @@ contract('LendingData', async (accounts) => {
         let txOptions = { from: accounts[0] };
         let installmentAmount = await instance.getLoanInstallmentCost.call(createdLoanId,1);
         installmentAmount = installmentAmount.overallInstallmentAmount;
-        /*
-        if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
-          installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
-        */
-        let regExp = /[a-zA-Z]/g;      
-        if(regExp.test(installmentAmount))
-          installmentAmount = web3.utils.hexToNumber(installmentAmount);
+        
+        //if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
+          //installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
+        
+        //let regExp = /[a-zA-Z]/g;      
+        //if(regExp.test(installmentAmount))
+          //installmentAmount = web3.utils.hexToNumber(installmentAmount);
 
         if ( loanObject.currency !== "0x0000000000000000000000000000000000000000" ){
           txOptions.value = 0;
@@ -394,7 +397,7 @@ contract('LendingData', async (accounts) => {
             nrOfInstallments = web3.utils.hexToNumber(loanObject.nrOfInstallments);
             initialNrOfPayments = web3.utils.hexToNumber(loanObject.nrOfPayments);
             if ( initialNrOfPayments < nrOfInstallments ){
-              console.log("We pay : " + installmentAmount + " where max amount is : " + web3.utils.hexToNumber(loanObject.amountDue));
+              //console.log("We pay : " + installmentAmount + " where max amount is : " + web3.utils.hexToNumber(loanObject.amountDue));
               const payLoan = await instance.payLoan(createdLoanId, txOptions);
               assert.typeOf(payLoan.receipt, 'object', "[BUGGED] :: Not possible to pay for loan. >> " + nrOfInstallments + " && " + web3.utils.hexToNumber(loanObject.nrOfPayments));
             }
@@ -405,7 +408,6 @@ contract('LendingData', async (accounts) => {
           assert.equal(parseInt(initialNrOfPayments + ( nrOfInstallments / 2 )),nrOfPayments,"[BUGGED] :: Number of payments is not accurate, possible paid too much / less.");
       });
 
-
       // payLoan(uint256)
       it('Should pay for loan, all installments', async () => {
         const instance = await LendingData.deployed();
@@ -415,13 +417,13 @@ contract('LendingData', async (accounts) => {
         let txOptions = { from: accounts[0] };
         let installmentAmount = await instance.getLoanInstallmentCost.call(createdLoanId,1);
         installmentAmount = installmentAmount.overallInstallmentAmount;
-        /*
-        if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
-          installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
-        */
-        let regExp = /[a-zA-Z]/g;      
-        if(regExp.test(installmentAmount))
-          installmentAmount = web3.utils.hexToNumber(installmentAmount);
+        
+        //if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
+          //installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
+        
+        //let regExp = /[a-zA-Z]/g;      
+        //if(regExp.test(installmentAmount))
+          //installmentAmount = web3.utils.hexToNumber(installmentAmount);
 
         if ( loanObject.currency !== "0x0000000000000000000000000000000000000000" ){
           txOptions.value = 0;
@@ -442,14 +444,13 @@ contract('LendingData', async (accounts) => {
             nrOfInstallments = web3.utils.hexToNumber(loanObject.nrOfInstallments);
             initialNrOfPayments = web3.utils.hexToNumber(loanObject.nrOfPayments);
             if ( initialNrOfPayments < nrOfInstallments ){
-              console.log("We pay : " + installmentAmount + " where max amount is : " + web3.utils.hexToNumber(loanObject.amountDue));
+              //console.log("We pay : " + installmentAmount + " where max amount is : " + web3.utils.hexToNumber(loanObject.amountDue));
               const payLoan = await instance.payLoan(createdLoanId, txOptions);
               assert.typeOf(payLoan.receipt, 'object', "[BUGGED] :: Not possible to pay for loan.");
             }
           }
         }
       });
-
 
       // terminateLoan(uint256)
       it('Should terminate the loan if lack of installments', async () => {
@@ -466,6 +467,7 @@ contract('LendingData', async (accounts) => {
       });
 
     });
+
 
   }
 
