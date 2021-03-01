@@ -30,8 +30,7 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
   event LoanCancelled(uint256 indexed loanId, uint256 cancellationDate, Status status);
   event ItemsWithdrawn(uint256 indexed loanId, address indexed requester, Status status);
   event LoanPayment(uint256 indexed loanId, uint256 paymentDate, uint256 installmentAmount, uint256 amountPaidAsInstallmentToLender, uint256 interestPerInstallement, uint256 interestToStaterPerInstallement, Status status);
-  event DiscountsChanged(uint32 indexed discountNft, uint32 indexed discountGeyser, uint32 lenderFee);
-  enum Status{ UNINITIALIZED, LISTED, APPROVED, DEFAULTED, LIQUIDATED, CANCELLED }
+  enum Status{ UNINITIALIZED, LISTED, APPROVED, DEFAULTED, LIQUIDATED, CANCELLED, WITHDRAWN }
   enum TokenType{ ERC721, ERC1155 }
   struct Loan {
     address[] nftAddressArray; // the adderess of the ERC721
@@ -71,8 +70,10 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     string calldata creationId,
     TokenType[] memory nftTokenTypeArray
   ) external {
-    require(nrOfInstallments > 0, "Loan must include at least 1 installment");
+    require(nrOfInstallments > 0, "Loan must have at least 1 installment");
     require(loanAmount > 0, "Loan amount must be higher than 0");
+    require(nftAddressArray.length > 0, "Loan must have atleast 1 NFT");
+    require(nftAddressArray.length == nftTokenIdArray.length && nftTokenIdArray.length == nftTokenTypeArray.length, "NFT provided informations are missing or incomplete");
 
     // Compute loan to value ratio for current loan application
     require(_percent(loanAmount, assetsValue) <= ltv, "LTV exceeds maximum limit allowed");
@@ -221,9 +222,10 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     require(msg.sender == loans[loanId].borrower || msg.sender == loans[loanId].lender, "You can't access this loan");
     require((block.timestamp >= loans[loanId].loanEnd || loans[loanId].paidAmount >= loans[loanId].amountDue) || lackOfPayment(loanId), "Not possible to finish this loan yet");
     require(loans[loanId].status == Status.LIQUIDATED || loans[loanId].status == Status.APPROVED, "Incorrect state of loan");
+    require(loans[loanId].status != Status.WITHDRAWN,"Loan NFTs already withdrawn");
 
     if ( lackOfPayment(loanId) ) {
-      loans[loanId].status = Status.DEFAULTED;
+      loans[loanId].status = Status.WITHDRAWN;
       loans[loanId].loanEnd = block.timestamp;
       // We send the items back to lender
       _transferItems(
@@ -235,7 +237,7 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
       );
     } else {
       if ( block.timestamp >= loans[loanId].loanEnd && loans[loanId].paidAmount < loans[loanId].amountDue ) {
-        loans[loanId].status = Status.DEFAULTED;
+        loans[loanId].status = Status.WITHDRAWN;
         // We send the items back to lender
         _transferItems(
           address(this),
@@ -245,6 +247,7 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
           loans[loanId].nftTokenTypeArray
         );
       } else if ( loans[loanId].paidAmount >= loans[loanId].amountDue ){
+        loans[loanId].status = Status.WITHDRAWN;
         // We send the items back to borrower
         _transferItems(
           address(this),
@@ -270,12 +273,11 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     uint256 nrOfInstallments,
     address currency
   ) external {
-    require(loans[loanId].status < Status.APPROVED,"Loan can no longer be modified");
-    require(assetsValue > 0, "Loan assets value must be higher than 0");
-    require(_percent(loans[loanId].loanAmount, assetsValue) <= ltv, "LTV exceeds maximum limit allowed");
+    require(nrOfInstallments > 0, "Loan must have at least 1 installment");
     require(loanAmount > 0, "Loan amount must be higher than 0");
-    require(_percent(loanAmount, loans[loanId].assetsValue) <= ltv, "LTV exceeds maximum limit allowed");
-    require(nrOfInstallments > 0, "Loan number of installments must be higher than 0");
+    require(loans[loanId].borrower == msg.sender,"You're not the owner of this loan");
+    require(loans[loanId].status < Status.APPROVED,"Loan can no longer be modified");
+    require(_percent(loanAmount, assetsValue) <= ltv, "LTV exceeds maximum limit allowed");
     loans[loanId].nrOfInstallments = nrOfInstallments;
     loans[loanId].loanAmount = loanAmount;
     loans[loanId].amountDue = loanAmount.mul(interestRate.add(100)).div(100);
@@ -305,13 +307,6 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     return loans[loanId].loanAmount.add(loans[loanId].loanAmount.div(lenderFee).div(calculateDiscount(msg.sender)));
   }
   
-  function setDiscounts(uint32 _discountNft, uint32 _discountGeyser, uint32 _lenderFee) external onlyOwner {
-    discountNft = _discountNft;
-    discountGeyser = _discountGeyser;
-    lenderFee = _lenderFee;
-    emit DiscountsChanged(discountNft,discountGeyser,lenderFee);
-  }
-  
   function getLoanRemainToPay(uint256 loanId) external view returns(uint256) {
     return loans[loanId].amountDue.sub(loans[loanId].paidAmount);
   }
@@ -337,26 +332,6 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     amountPaidAsInstallmentToLender = interestPerInstallement.mul(uint256(100).sub(interestRateToStater)).div(100); 
   }
   
-  function setGlobalVariables(uint256 _ltv, uint256 _installmentFrequency, TimeScale _installmentTimeScale, uint256 _interestRate, uint256 _interestRateToStater) external onlyOwner {
-    ltv = _ltv;
-    installmentFrequency = _installmentFrequency;
-    installmentTimeScale = _installmentTimeScale;
-    interestRate = _interestRate;
-    interestRateToStater = _interestRateToStater;
-  }
-  
-  function addGeyserAddress(address geyserAddress) external onlyOwner {
-      geyserAddressArray.push(geyserAddress);
-  }
-  
-  function addNftTokenId(uint256 nftId) external onlyOwner {
-      staterNftTokenIdArray.push(nftId);
-  }
-
-  function setNftAddress(address _nftAddress) external onlyOwner {
-    nftAddress = _nftAddress;
-  }
-  
   function lackOfPayment(uint256 loanId) public view returns(bool) {
     return loans[loanId].status == Status.APPROVED && loans[loanId].loanStart.add(loans[loanId].nrOfPayments.mul(generateInstallmentFrequency())) <= block.timestamp.sub(loans[loanId].defaultingLimit.mul(generateInstallmentFrequency()));
   }
@@ -370,6 +345,31 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
       return 1 days;
     }
     return 1 weeks;
+  }
+  
+  function setDiscounts(uint32 _discountNft, uint32 _discountGeyser, address[] calldata _geyserAddressArray, uint256[] calldata _staterNftTokenIdArray, address _nftAddress) external onlyOwner {
+    discountNft = _discountNft;
+    discountGeyser = _discountGeyser;
+    geyserAddressArray = _geyserAddressArray;
+    staterNftTokenIdArray = _staterNftTokenIdArray;
+    nftAddress = _nftAddress;
+  }
+  
+  function setGlobalVariables(uint256 _ltv, uint256 _installmentFrequency, TimeScale _installmentTimeScale, uint256 _interestRate, uint256 _interestRateToStater, uint32 _lenderFee) external onlyOwner {
+    ltv = _ltv;
+    installmentFrequency = _installmentFrequency;
+    installmentTimeScale = _installmentTimeScale;
+    interestRate = _interestRate;
+    interestRateToStater = _interestRateToStater;
+    lenderFee = _lenderFee;
+  }
+  
+  function addGeyserAddress(address geyserAddress) external onlyOwner {
+      geyserAddressArray.push(geyserAddress);
+  }
+  
+  function addNftTokenId(uint256 nftId) external onlyOwner {
+      staterNftTokenIdArray.push(nftId);
   }
 
   // Calculates loan to value ratio
