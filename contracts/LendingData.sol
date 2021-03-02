@@ -6,15 +6,15 @@ import "openzeppelin-solidity/contracts/token/ERC721/ERC721Holder.sol";
 import "multi-token-standard/contracts/interfaces/IERC1155.sol";
 import "openzeppelin-solidity/contracts/token/ERC1155/ERC1155Holder.sol";
 import "openzeppelin-solidity/contracts/access/Ownable.sol";
-import "openzeppelin-solidity/contracts/utils/ReentrancyGuard.sol";
 import "openzeppelin-solidity/contracts/math/SafeMath.sol";
 interface Geyser{ function totalStakedFor(address addr) external view returns(uint256); }
 
-contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
+contract LendingData is ERC721Holder, ERC1155Holder, Ownable {
   using SafeMath for uint256;
   enum TimeScale{ MINUTES, HOURS, DAYS, WEEKS }
   address public nftAddress; //0xcb13DC836C2331C669413352b836F1dA728ce21c
   address[] public geyserAddressArray; //[0xf1007ACC8F0229fCcFA566522FC83172602ab7e3]
+  address public promissoryNoteContractAddress;
   uint256[] public staterNftTokenIdArray; //[0, 1]
   uint32 public discountNft = 50;
   uint32 public discountGeyser = 5;
@@ -52,11 +52,13 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     TokenType[] nftTokenTypeArray; // the token types : ERC721 , ERC1155 , ...
   }
   mapping(uint256 => Loan) public loans;
+  mapping(address => mapping(uint256 => bool)) public promissoryPermissions;
 
-  constructor(address _nftAddress, address[] memory _geyserAddressArray, uint256[] memory _staterNftTokenIdArray) {
+  constructor(address _nftAddress, address _promissoryNoteContractAddress, address[] memory _geyserAddressArray, uint256[] memory _staterNftTokenIdArray) {
     nftAddress = _nftAddress;
     geyserAddressArray = _geyserAddressArray;
     staterNftTokenIdArray = _staterNftTokenIdArray;
+    promissoryNoteContractAddress = _promissoryNoteContractAddress;
   }
 
   // Borrower creates a loan
@@ -77,15 +79,6 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
 
     // Compute loan to value ratio for current loan application
     require(_percent(loanAmount, assetsValue) <= ltv, "LTV exceeds maximum limit allowed");
-
-    // Transfer the items from lender to stater contract
-    _transferItems(
-        msg.sender, 
-        address(this), 
-        nftAddressArray, 
-        nftTokenIdArray,
-        nftTokenTypeArray
-    );
 
     // Computing the defaulting limit
     if ( nrOfInstallments <= 3 )
@@ -108,11 +101,19 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     loans[loanID].currency = currency;
     loans[loanID].nftTokenTypeArray = nftTokenTypeArray;
  
+    // Transfer the items from lender to stater contract
+    _transferItems(
+        msg.sender, 
+        address(this), 
+        nftAddressArray, 
+        nftTokenIdArray,
+        nftTokenTypeArray
+    );
+
     // Fire event
     emit NewLoan(loanID, msg.sender, block.timestamp, currency, Status.LISTED, creationId);
     ++loanID;
   }
-
 
   // Lender approves a loan
   function approveLoan(uint256 loanId) external payable {
@@ -126,14 +127,14 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     if ( loans[loanId].currency == address(0) )
       require(msg.value >= loans[loanId].loanAmount.add(loans[loanId].loanAmount.div(lenderFee).div(discount)),"Not enough currency");
 
-    // We send the tokens here
-    _transferTokens(msg.sender,loans[loanId].borrower,loans[loanId].currency,loans[loanId].loanAmount,loans[loanId].loanAmount.div(lenderFee).div(discount));
-
     // Borrower assigned , status is 1 , first installment ( payment ) completed
     loans[loanId].lender = msg.sender;
     loans[loanId].loanEnd = block.timestamp.add(loans[loanId].nrOfInstallments.mul(generateInstallmentFrequency()));
     loans[loanId].status = Status.APPROVED;
     loans[loanId].loanStart = block.timestamp;
+
+    // We send the tokens here
+    _transferTokens(msg.sender,loans[loanId].borrower,loans[loanId].currency,loans[loanId].loanAmount,loans[loanId].loanAmount.div(lenderFee).div(discount));
 
     emit LoanApproved(
       loanId,
@@ -143,8 +144,6 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
       Status.APPROVED
     );
   }
-
-
 
   // Borrower cancels a loan
   function cancelLoan(uint256 loanId) external {
@@ -195,15 +194,15 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
         interestToStaterPerInstallement = interestToStaterPerInstallement.sub(interestToStaterPerInstallement.div(discount));
     }
     amountPaidAsInstallmentToLender = amountPaidAsInstallmentToLender.sub(interestToStaterPerInstallement);
-    
-    // We transfer the tokens to borrower here
-    _transferTokens(msg.sender,loans[loanId].lender,loans[loanId].currency,amountPaidAsInstallmentToLender,interestToStaterPerInstallement);
 
     loans[loanId].paidAmount = loans[loanId].paidAmount.add(paidByBorrower);
     loans[loanId].nrOfPayments = loans[loanId].nrOfPayments.add(paidByBorrower.div(loans[loanId].installmentAmount));
 
     if (loans[loanId].paidAmount >= loans[loanId].amountDue)
       loans[loanId].status = Status.LIQUIDATED;
+
+    // We transfer the tokens to borrower here
+    _transferTokens(msg.sender,loans[loanId].lender,loans[loanId].currency,amountPaidAsInstallmentToLender,interestToStaterPerInstallement);
 
     emit LoanPayment(
       loanId,
@@ -266,31 +265,20 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     );
   }
   
-  function editLoan(
-    uint256 loanId,
-    uint256 assetsValue,
-    uint256 loanAmount,
-    uint256 nrOfInstallments,
-    address currency
-  ) external {
-    require(nrOfInstallments > 0, "Loan must have at least 1 installment");
-    require(loanAmount > 0, "Loan amount must be higher than 0");
-    require(loans[loanId].borrower == msg.sender,"You're not the owner of this loan");
-    require(loans[loanId].status < Status.APPROVED,"Loan can no longer be modified");
-    require(_percent(loanAmount, assetsValue) <= ltv, "LTV exceeds maximum limit allowed");
-    loans[loanId].nrOfInstallments = nrOfInstallments;
-    loans[loanId].loanAmount = loanAmount;
-    loans[loanId].amountDue = loanAmount.mul(interestRate.add(100)).div(100);
-    loans[loanId].installmentAmount = loans[loanId].amountDue.mod(nrOfInstallments) > 0 ? loans[loanId].amountDue.div(nrOfInstallments).add(1) : loans[loanId].amountDue.div(nrOfInstallments);
-    loans[loanId].assetsValue = assetsValue;
-    loans[loanId].currency = currency;
-    // Computing the defaulting limit
-    if ( nrOfInstallments <= 3 )
-        loans[loanId].defaultingLimit = 1;
-    else if ( nrOfInstallments <= 5 )
-        loans[loanId].defaultingLimit = 2;
-    else if ( nrOfInstallments >= 6 )
-        loans[loanId].defaultingLimit = 3;
+  function promissoryExchange(uint256[] calldata loanIds, address payable newOwner) external {
+      require(msg.sender == promissoryNoteContractAddress,"You're not whitelisted to access this method");
+      for ( uint256 i = 0 ; i < loanIds.length ; ++i ){
+        require(loans[loanIds[i]].lender != address(0),"One of the loans is not approved yet");
+        require(promissoryPermissions[promissoryNoteContractAddress][loanIds[i]],"You're not allowed to perform this operation on loan");
+        loans[loanIds[i]].lender = newOwner;
+      }
+  }
+  
+  function setPromissoryPermissions(uint256[] calldata loanIds) external {
+      for ( uint256 i = 0 ; i < loanIds.length ; ++i ){
+          require(loans[loanIds[i]].lender == msg.sender,"One of the loans is not approved yet");
+          promissoryPermissions[promissoryNoteContractAddress][loanIds[i]] = true;
+      }
   }
 
   function calculateDiscount(address requester) public view returns(uint256){
@@ -355,13 +343,14 @@ contract LendingData is ERC721Holder, ERC1155Holder, Ownable, ReentrancyGuard {
     nftAddress = _nftAddress;
   }
   
-  function setGlobalVariables(uint256 _ltv, uint256 _installmentFrequency, TimeScale _installmentTimeScale, uint256 _interestRate, uint256 _interestRateToStater, uint32 _lenderFee) external onlyOwner {
+  function setGlobalVariables(address _promissoryNoteContractAddress, uint256 _ltv, uint256 _installmentFrequency, TimeScale _installmentTimeScale, uint256 _interestRate, uint256 _interestRateToStater, uint32 _lenderFee) external onlyOwner {
     ltv = _ltv;
     installmentFrequency = _installmentFrequency;
     installmentTimeScale = _installmentTimeScale;
     interestRate = _interestRate;
     interestRateToStater = _interestRateToStater;
     lenderFee = _lenderFee;
+    promissoryNoteContractAddress = _promissoryNoteContractAddress;
   }
   
   function addGeyserAddress(address geyserAddress) external onlyOwner {
