@@ -43,20 +43,4 @@ contract GameItems721 is ERC721, Ownable, ReentrancyGuard {
         items[itemId].image_url = image_url;
     }
 
-    function getItemOwner(uint256 itemId) external view returns(address) {
-        return items[itemId].owner;
-    }
-
-    function getItemName(uint256 itemId) external view returns(string memory) {
-        return items[itemId].name;
-    }
-
-    function getItemDescription(uint256 itemId) external view returns(string memory) {
-        return items[itemId].description;
-    }
-
-    function getItemUrl(uint256 itemId) external view returns(string memory) {
-        return items[itemId].image_url;
-    }
-
 }

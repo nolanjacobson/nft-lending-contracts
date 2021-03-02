@@ -83,6 +83,8 @@ contract('LendingData', async (accounts) => {
   let lenderFee = 100;
   let discountNft = 50; // 50%
   let discountGeyser = 5; // 15%
+  let numberOfLoansToTest = Math.floor(Math.random() * 10) + 1;
+
 
   describe("4 > Should set all Lending Contract global variables", function () {
 
@@ -104,7 +106,7 @@ contract('LendingData', async (accounts) => {
     // setGlobalVariables(uint256,uint256,uint256)
     it('Should set the lending contract global variables', async () => {
       const instance = await LendingData.deployed(); 
-      let setGlobalVariables = await instance.setGlobalVariables(ltv,installmentFrequency,timeStampWeeks,interestRate,interestRateToStater,lenderFee,{ from: accounts[0] });
+      let setGlobalVariables = await instance.setGlobalVariables("0x0000000000000000000000000000000000000000",ltv,installmentFrequency,timeStampWeeks,interestRate,interestRateToStater,lenderFee,{ from: accounts[0] });
       assert.typeOf(setGlobalVariables, 'object', "[BUGGED] :: Not possible to set the loan global variables.");
     });
 
@@ -118,7 +120,6 @@ contract('LendingData', async (accounts) => {
     });
     
   });
-
 
 
   describe("5 > Should check the Lending Contract global variables", function () {
@@ -157,9 +158,30 @@ contract('LendingData', async (accounts) => {
 
   });
 
-  let numberOfLoansToTest = Math.floor(Math.random() * 10) + 1;
 
   for ( let i = 0 ; i < numberOfLoansToTest ; ++i ){
+
+    let loanAmount = Math.floor(Math.random() * 100000000) + 1;
+    let nrOfInstallments = Math.floor(Math.random() * 20) + 1;
+    let currency;
+    let min = Math.ceil(loanAmount);
+    let max = Math.floor(loanAmount * 160 / 100);
+    let assetsValue = loanAmount + Math.floor(Math.random() * (max - min + 1)) + min;
+    let creationId = "db_index";
+    let nrOfTokensToAdd = Math.floor(Math.random() * 20) + 1;
+    let nftAddressArray = [];
+    let nftTokenIdArray = [];
+    let nftTokenTypeArray = [];
+    let tokenId = null;
+    let currentLoanID;
+
+    // nftAddress
+    it('Should get the nft address used by lending contract', async () => {
+      const instance = await LendingData.deployed(); 
+      const loanID = await instance.loanID.call();
+      currentLoanID = web3.utils.hexToNumber(loanID);
+      assert.typeOf(currentLoanID, "number", "[WARNING] :: Loan ID getter bugged.");
+    });
 
     describe("6 > Loan creation [ Loan : " + i + " / " + numberOfLoansToTest + " ]", function () {
 
@@ -171,18 +193,7 @@ contract('LendingData', async (accounts) => {
         const instanceGameItems1155 = await GameItems1155.deployed();
         const instanceFungibleTokens = await FungibleTokens.deployed();
 
-        let loanAmount = Math.floor(Math.random() * 100000000) + 1;
-        let nrOfInstallments = Math.floor(Math.random() * 20) + 1;
-        let currency = Math.floor(Math.random() * 2) === 0 ? "0x0000000000000000000000000000000000000000" : instanceFungibleTokens.address;
-        let min = Math.ceil(loanAmount);
-        let max = Math.floor(loanAmount * 160 / 100);
-        let assetsValue = loanAmount + Math.floor(Math.random() * (max - min + 1)) + min;
-        let creationId = "db_index";
-        let nrOfTokensToAdd = Math.floor(Math.random() * 20) + 1;
-        let nftAddressArray = [];
-        let nftTokenIdArray = [];
-        let nftTokenTypeArray = [];
-        let tokenId = null;
+        currency = Math.floor(Math.random() * 2) === 0 ? "0x0000000000000000000000000000000000000000" : instanceFungibleTokens.address;
 
         for (let i = 0, l = nrOfTokensToAdd; i < l; ++i) 
 
@@ -201,6 +212,7 @@ contract('LendingData', async (accounts) => {
                 let approveTokenToContract = await instanceGameItems721.approve(instance.address, tokenId, {
                   from: accounts[0]
                 });
+                
                 assert.typeOf(approveTokenToContract.receipt, 'object', "[ERROR] :: Approve token for contract failed.");
                 nftTokenIdArray.push(tokenId);
                 nftAddressArray.push(instanceGameItems721.address);
@@ -252,7 +264,11 @@ contract('LendingData', async (accounts) => {
         for (let j = 0, k = createLoan.logs.length; j < k; ++j)
           createdLoanId = createLoan.logs[j].args.loanId;
         assert.typeOf(createLoan.receipt, 'object', "[ERROR] :: Create loan failed.");
-       
+
+        const loanID = await instance.loanID.call();
+        assert.equal(currentLoanID,loanID-1,"[BUGGED] :: Too many loans created.");
+        currentLoanID = loanID;
+
       });
 
       // getLoanApprovalCost(uint256)
@@ -335,16 +351,8 @@ contract('LendingData', async (accounts) => {
         let installmentAmount = await instance.getLoanInstallmentCost.call(createdLoanId,1);
         installmentAmount = installmentAmount.overallInstallmentAmount;
         
-        //if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
-          //installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
-        
-        //let regExp = /[a-zA-Z]/g;      
-        //if(regExp.test(installmentAmount))
-          //installmentAmount = web3.utils.hexToNumber(installmentAmount);
-
         assert.equal(web3.utils.hexToNumber(loanObject.nrOfPayments), 0, "[BUGGED] :: Loan should have no payment at this point.");
 
-        //console.log("We pay : " + installmentAmount + " where max amount is : " + web3.utils.hexToNumber(loanObject.amountDue));
         if ( loanObject.currency !== "0x0000000000000000000000000000000000000000" ){
           txOptions.value = 0;
           let approveFungibleTokensToParties = await instanceFungibleTokens.approve(instance.address,installmentAmount,{
@@ -372,40 +380,33 @@ contract('LendingData', async (accounts) => {
         let installmentAmount = await instance.getLoanInstallmentCost.call(createdLoanId,1);
         installmentAmount = installmentAmount.overallInstallmentAmount;
         
-        //if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
-          //installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
-        
-        //let regExp = /[a-zA-Z]/g;      
-        //if(regExp.test(installmentAmount))
-          //installmentAmount = web3.utils.hexToNumber(installmentAmount);
-
-        if ( loanObject.currency !== "0x0000000000000000000000000000000000000000" ){
-          txOptions.value = 0;
-          let approveFungibleTokensToParties = await instanceFungibleTokens.approve(instance.address,installmentAmount,{
-            from : accounts[0]
-          });
-          assert.typeOf(approveFungibleTokensToParties, 'object', "[ERROR] :: Cannot approve the sent fungible tokens.");
-        }else{
-          txOptions.value = installmentAmount;
-        }
-
         let nrOfInstallments = web3.utils.hexToNumber(loanObject.nrOfInstallments);
         let initialNrOfPayments = web3.utils.hexToNumber(loanObject.nrOfPayments);
         if ( ( nrOfInstallments / 2 ) < ( nrOfInstallments - initialNrOfPayments ) )
           for (let i = 0, l = nrOfInstallments / 2; i < l; ++i) {
+
+            if ( loanObject.currency !== "0x0000000000000000000000000000000000000000" ){
+              txOptions.value = 0;
+              let approveFungibleTokensToParties = await instanceFungibleTokens.approve(instance.address,installmentAmount,{
+                from : accounts[0]
+              });
+              assert.typeOf(approveFungibleTokensToParties, 'object', "[ERROR] :: Cannot approve the sent fungible tokens.");
+            }else{
+              txOptions.value = installmentAmount;
+            }    
+
             loanObject = await instance.loans.call(createdLoanId);
             nrOfInstallments = web3.utils.hexToNumber(loanObject.nrOfInstallments);
             initialNrOfPayments = web3.utils.hexToNumber(loanObject.nrOfPayments);
             if ( initialNrOfPayments < nrOfInstallments ){
-              //console.log("We pay : " + installmentAmount + " where max amount is : " + web3.utils.hexToNumber(loanObject.amountDue));
               const payLoan = await instance.payLoan(createdLoanId, txOptions);
               assert.typeOf(payLoan.receipt, 'object', "[BUGGED] :: Not possible to pay for loan. >> " + nrOfInstallments + " && " + web3.utils.hexToNumber(loanObject.nrOfPayments));
+              loanObject = await instance.loans.call(createdLoanId);
+              let nrOfPayments = web3.utils.hexToNumber(loanObject.nrOfPayments);
+              assert.equal(initialNrOfPayments+1,nrOfPayments,"[BUGGED] :: Number of payments is not accurate, possible paid too much / less.");
             }
           }
 
-          loanObject = await instance.loans.call(createdLoanId);
-          let nrOfPayments = web3.utils.hexToNumber(loanObject.nrOfPayments);
-          assert.equal(parseInt(initialNrOfPayments + ( nrOfInstallments / 2 )),nrOfPayments,"[BUGGED] :: Number of payments is not accurate, possible paid too much / less.");
       });
 
       // payLoan(uint256)
@@ -417,29 +418,23 @@ contract('LendingData', async (accounts) => {
         let txOptions = { from: accounts[0] };
         let installmentAmount = await instance.getLoanInstallmentCost.call(createdLoanId,1);
         installmentAmount = installmentAmount.overallInstallmentAmount;
-        
-        //if ( ( web3.utils.hexToNumber(loanObject.installmentAmount) * 1.5 ) < web3.utils.hexToNumber(installmentAmount) )
-          //installmentAmount = web3.utils.hexToNumber("0x" + installmentAmount);
-        
-        //let regExp = /[a-zA-Z]/g;      
-        //if(regExp.test(installmentAmount))
-          //installmentAmount = web3.utils.hexToNumber(installmentAmount);
-
-        if ( loanObject.currency !== "0x0000000000000000000000000000000000000000" ){
-          txOptions.value = 0;
-          let approveFungibleTokensToParties = await instanceFungibleTokens.approve(instance.address,installmentAmount,{
-            from : accounts[0]
-          });
-          assert.typeOf(approveFungibleTokensToParties, 'object', "[ERROR] :: Cannot approve the sent fungible tokens.");
-        }else{
-          txOptions.value = installmentAmount;
-        }
 
         let nrOfInstallments = web3.utils.hexToNumber(loanObject.nrOfInstallments);
         let initialNrOfPayments = web3.utils.hexToNumber(loanObject.nrOfPayments);
         if ( initialNrOfPayments < nrOfInstallments ){
           let nrOfInstallments = loanObject.nrOfInstallments - loanObject.nrOfPayments;
           for (let i = 0, l = nrOfInstallments; i < l; ++i) {
+
+            if ( loanObject.currency !== "0x0000000000000000000000000000000000000000" ){
+              txOptions.value = 0;
+              let approveFungibleTokensToParties = await instanceFungibleTokens.approve(instance.address,installmentAmount,{
+                from : accounts[0]
+              });
+              assert.typeOf(approveFungibleTokensToParties, 'object', "[ERROR] :: Cannot approve the sent fungible tokens.");
+            }else{
+              txOptions.value = installmentAmount;
+            }
+
             loanObject = await instance.loans.call(createdLoanId);
             nrOfInstallments = web3.utils.hexToNumber(loanObject.nrOfInstallments);
             initialNrOfPayments = web3.utils.hexToNumber(loanObject.nrOfPayments);
